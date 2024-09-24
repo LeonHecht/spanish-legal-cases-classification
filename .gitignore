@@ -1,3 +1,30 @@
+# ignore corpus folder
+corpus/
+
+# ignore documentation folder
+documentation/
+
+# ignore GoogleCloudKey folder
+GoogleCloudKey/
+
+# ignore logs folder
+logs/
+
+# ignore results folder
+results/
+
+# ignore runs folder
+runs/
+
+caso_legal.png
+
+# ignore all files ending in .run
+*.run
+
+TAREAS.ipynb
+test.ipynb
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
