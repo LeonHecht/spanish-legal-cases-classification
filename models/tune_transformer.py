@@ -353,12 +353,21 @@ def run_optimization(model_checkpoint, num_labels, train_texts, val_texts, test_
     return test_pred_labels
 
 
-def run_lora(model_checkpoint, train_texts, val_texts, test_texts, y_train, y_val, y_test):
+def run_lora(model_checkpoint, num_labels,
+             train_texts, val_texts, test_texts,
+             y_train, y_val, y_test,
+             hyperparameters):
     from peft import LoraConfig, get_peft_model
 
-    tokenizer = AutoTokenizer.from_pretrained(model_checkpoint)
-    train_dataset, val_dataset, test_dataset = create_datasets(tokenizer, train_texts, val_texts, test_texts, y_train, y_val, y_test)
-    model = load_model(model_checkpoint)
+    max_length = hyperparameters.get("max_length", 256)
+
+    # tokenizer = AutoTokenizer.from_pretrained(model_checkpoint)
+    tokenizer = AutoTokenizer.from_pretrained('google-bert/bert-base-uncased')
+    train_dataset, val_dataset, test_dataset = create_datasets(tokenizer, train_texts, val_texts, test_texts, y_train, y_val, y_test, max_length)
+    classes = np.unique(y_train)
+    print("Type of classes:", type(classes))
+    print("Classes:", classes)
+    model = load_model(model_checkpoint, num_labels, classes, y_train, hyperparameters['use_weighted_loss'])
     print(model)
 
     # LoRA config
@@ -373,18 +382,27 @@ def run_lora(model_checkpoint, train_texts, val_texts, test_texts, y_train, y_va
         #         f"deberta.encoder.layer.{i}.attention.output.dense"
         #     ]
         # ],
+    # lora_config = LoraConfig(
+    #     target_modules = [
+    #         f"distilbert.transformer.layer.{i}.attention.q_lin" for i in range(6)] + [
+    #         f"distilbert.transformer.layer.{i}.attention.k_lin" for i in range(6)] + [
+    #         f"distilbert.transformer.layer.{i}.attention.v_lin" for i in range(6)] + [
+    #         f"distilbert.transformer.layer.{i}.attention.out_lin" for i in range(6)] + [
+    #         f"distilbert.transformer.layer.{i}.ffn.lin1" for i in range(6)] + [
+    #         f"distilbert.transformer.layer.{i}.ffn.lin2" for i in range(6)
+    #     ],
     lora_config = LoraConfig(
-        target_modules = [
-            f"distilbert.transformer.layer.{i}.attention.q_lin" for i in range(6)] + [
-            f"distilbert.transformer.layer.{i}.attention.k_lin" for i in range(6)] + [
-            f"distilbert.transformer.layer.{i}.attention.v_lin" for i in range(6)] + [
-            f"distilbert.transformer.layer.{i}.attention.out_lin" for i in range(6)] + [
-            f"distilbert.transformer.layer.{i}.ffn.lin1" for i in range(6)] + [
-            f"distilbert.transformer.layer.{i}.ffn.lin2" for i in range(6)
+        target_modules=[
+            f"roberta.encoder.layer.{i}.attention.self.query" for i in range(12)] + [
+            f"roberta.encoder.layer.{i}.attention.self.key" for i in range(12)] + [
+            f"roberta.encoder.layer.{i}.attention.self.value" for i in range(12)] + [
+            f"roberta.encoder.layer.{i}.attention.output.dense" for i in range(12)] + [
+            f"roberta.encoder.layer.{i}.intermediate.dense" for i in range(12)] + [
+            f"roberta.encoder.layer.{i}.output.dense" for i in range(12)
         ],
-        r=64,
+        r=16,
         task_type="SEQ_CLS",
-        lora_alpha=128,
+        lora_alpha=32,
         lora_dropout=0.05,       # 0.05
         use_rslora=True
     )
@@ -392,8 +410,8 @@ def run_lora(model_checkpoint, train_texts, val_texts, test_texts, y_train, y_va
     # load LoRA model
     lora_model = get_peft_model(model, lora_config)
 
-    training_args = training_arguments()
-    trainer = get_trainer(lora_model, training_args, train_dataset, val_dataset)
+    training_args = training_arguments(hyperparameters)
+    trainer = get_trainer(lora_model, training_args, train_dataset, val_dataset, hyperparameters)
     
     # Train the model
     print("Training the model...")
@@ -404,9 +422,13 @@ def run_lora(model_checkpoint, train_texts, val_texts, test_texts, y_train, y_va
     predictions = predict(trainer, test_dataset)
     test_pred_labels = get_labels(predictions)
     # Generate and print the classification report
-    print(classification_report(y_test, test_pred_labels, target_names=['Class 0', 'Class 1', 'Class 2', 'Class 3']))
+    if num_labels == 2:
+        print(classification_report(y_test, test_pred_labels, target_names=['Class 0', 'Class 1']))
+    elif num_labels == 3:
+        print(classification_report(y_test, test_pred_labels, target_names=['Class 1', 'Class 2', 'Class 3']))
+    else:
+        print(classification_report(y_test, test_pred_labels, target_names=['Class 0', 'Class 1', 'Class 2', 'Class 3']))
     return test_pred_labels
-
 
 from sklearn.model_selection import ParameterGrid
 from datetime import datetime
