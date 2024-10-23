@@ -67,7 +67,7 @@ def get_text_from_scanned_pdf(pdf_path) -> str:
 
     # Iterate through all pages and process each image with OCR
     for page_number, page_image in enumerate(pages, start=1):
-        print(f"Processing page {page_number}...")
+        # print(f"Processing page {page_number}...")
         
         # Save the page image temporarily
         temp_image_path = f"temp_page_{page_number}.jpg"

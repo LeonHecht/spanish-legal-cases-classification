@@ -1,5 +1,5 @@
 
-from datasets import Dataset
+from datasets import Dataset, load_from_disk
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, Trainer, TrainingArguments, TrainerControl, TrainerState
 import numpy as np
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
@@ -103,49 +103,11 @@ class WeightedAutoModel(AutoModelForSequenceClassification):
     #     return loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
 
 
-class LossDifferenceCallback(TrainerCallback):
-    def __init__(self, loss_diff_threshold):
-        # Threshold for difference in loss
-        self.loss_diff_threshold = loss_diff_threshold
-        self.training_losses = []
-
-    def on_log(self, args, state, control, logs=None, **kwargs):
-        # Store training loss from each logging step
-        if logs is not None:
-            if 'loss' in logs:
-                self.training_losses.append(logs['loss'])
-
-    def on_evaluate(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, metrics=None, **kwargs):
-        # Calculate the average training loss
-        average_training_loss = sum(self.training_losses) / len(self.training_losses) if self.training_losses else float('inf')
-        # Get the validation loss from the evaluation metrics
-        validation_loss = metrics.get("eval_loss", float("inf"))
-        # print the average training loss and validation loss with two decimal places
-        print(f"\n\nAverage training loss: {average_training_loss:.2f}, Validation loss: {validation_loss:.2f}\n\n")
-
-        # Calculate the difference and decide if training should stop
-        loss_diff = abs((validation_loss - average_training_loss) / average_training_loss)
-        if loss_diff > self.loss_diff_threshold:
-            print(f"Stopping training due to loss difference: {loss_diff}")
-            control.should_training_stop = True
-
-        # Reset training losses after evaluation
-        self.training_losses = []
-
-
-class CustomDataParallel(torch.nn.DataParallel):
-    def __getattr__(self, name):
-        try:
-            # First, try to access attribute from the DataParallel itself
-            return super().__getattr__(name)
-        except AttributeError:
-            # If failed, try to access it from the wrapped model
-            return getattr(self.module, name)
-
-
-def create_datasets(tokenizer, train_texts, val_texts, test_texts, y_train, y_val, y_test=None, max_length=256):
+def create_datasets(tokenizer, train_texts, val_texts, test_texts, y_train, y_val, y_test=None, max_length=256, stride=None):
     # Tokenize and encode the text data
     def tokenize_data(texts, labels=None):
+        """ Tokenize data without sliding window """
+        print("Using normal tokenization without sliding window")
         if not all(isinstance(text, str) for text in texts):
             raise ValueError("All elements in 'texts' must be strings.")
         encodings = tokenizer(texts, truncation=True, padding=True, max_length=max_length)
@@ -153,9 +115,72 @@ def create_datasets(tokenizer, train_texts, val_texts, test_texts, y_train, y_va
             encodings["labels"] = labels
         return encodings
 
-    train_encodings = tokenize_data(train_texts.to_list(), y_train.to_list())
-    val_encodings = tokenize_data(val_texts.to_list(), y_val.to_list())
-    test_encodings = tokenize_data(test_texts.to_list(), y_test.to_list() if y_test is not None else None)
+    def tokenize_data_sliding_window(texts, labels=None):
+        """ Tokenize data and implement sliding window with stride """
+        print(f"Using sliding window with stride {stride}")
+
+        if not all(isinstance(text, str) for text in texts):
+            raise ValueError("All elements in 'texts' must be strings.")
+
+        encodings = {
+            "input_ids": [],
+            "attention_mask": [],
+            "labels": [],
+            "docID": []
+        }
+
+        total_chunks = 0
+
+        for i, text in enumerate(texts):
+            text_length = len(tokenizer(text)["input_ids"])
+            # print(f"Original text length for text {i}: {text_length}")
+
+            # Tokenize text with sliding window
+            tokenized_example = tokenizer(
+                text,
+                truncation=True,
+                padding='max_length',
+                max_length=max_length,
+                stride=stride,  # Implementing sliding window with stride
+                return_overflowing_tokens=True,  # To get multiple windows per text
+                return_offsets_mapping=False  # Not needed for this use case
+            )
+
+            # print("tokenized_example:", tokenized_example)
+            
+            num_chunks = len(tokenized_example['input_ids'])  # Number of chunks created
+            # print(f"Number of chunks for text {i}: {num_chunks}")
+            total_chunks += num_chunks
+
+            # Extend the encodings with each chunk and corresponding label
+            encodings["input_ids"].extend(tokenized_example["input_ids"])
+            encodings["attention_mask"].extend(tokenized_example["attention_mask"])
+
+            # Assign the same document ID to all chunks of the same text
+            encodings["docID"].extend([i] * num_chunks)
+            
+            if labels is not None:
+                # Assign the same label to all chunks of the original text
+                encodings["labels"].extend([labels[i]] * num_chunks)
+
+        print(f"Total number of chunks: {total_chunks}")
+
+        return encodings
+
+    print("Stride:", stride)
+    
+    # Tokenize the data
+    if stride is None:
+        train_encodings = tokenize_data(train_texts.to_list(), y_train.to_list())
+        val_encodings = tokenize_data(val_texts.to_list(), y_val.to_list())
+        test_encodings = tokenize_data(test_texts.to_list(), y_test.to_list() if y_test is not None else None)
+    else:
+        print("Tokenizing train data...")
+        train_encodings = tokenize_data_sliding_window(train_texts.to_list(), y_train.to_list())
+        print("Tokenizing val data...")
+        val_encodings = tokenize_data_sliding_window(val_texts.to_list(), y_val.to_list())
+        print("Tokenizing test data...")
+        test_encodings = tokenize_data_sliding_window(test_texts.to_list(), y_test.to_list() if y_test is not None else None)
 
     # Convert to Hugging Face Dataset
     train_dataset = Dataset.from_dict(train_encodings)
@@ -177,12 +202,6 @@ def load_model(model_checkpoint, num_labels, classes, y_train, is_weighted):
     else:
         model = AutoModelForSequenceClassification.from_pretrained(model_checkpoint, num_labels=num_labels)
         print("using automodel")
-    # weighted_model.load_state_dict(model.state_dict())  # Copy the weights from the original model
-    # Wrap the model with DataParallel to use multiple GPUs
-    # if torch.cuda.device_count() > 1:
-    #     print(f"Using {torch.cuda.device_count()} GPUs!")
-    #     model = CustomDataParallel(model)
-    # model.cuda()  # Ensure the model is on the correct device
     return model
 
 
@@ -225,34 +244,71 @@ def training_arguments(hyperparameters):
     save_total_limit=1,  # limit the number of saved checkpoints
     load_best_model_at_end=True,
     metric_for_best_model=metric,
-    remove_unused_columns=False,  # Keep all columns
+    remove_unused_columns=True,  # Keep all columns
     greater_is_better=True  # Higher f1 score is better
     )
     return training_args
 
 
-def get_trainer(model, training_args, train_dataset, val_dataset, hyperparameters):
+def get_trainer(model, training_args, tokenizer, train_dataset, val_dataset, hyperparameters):
     trainer = Trainer(
     model=model,
     args=training_args,
     train_dataset=train_dataset,
     eval_dataset=val_dataset,
     compute_metrics=compute_metrics,
+    tokenizer=tokenizer,
     callbacks=[EarlyStoppingCallback(early_stopping_patience=hyperparameters.get("early_stopping_patience", 4))]
-    # callbacks=[LossDifferenceCallback(loss_diff_threshold=loss_diff_threshold)]
     )
     return trainer
 
 
 def predict(trainer, test_dataset):
     predictions = trainer.predict(test_dataset)
-    return predictions
-
-
-def get_labels(predictions):
     test_pred_labels = np.argmax(predictions.predictions, axis=-1)
     print("Predicted Labels", test_pred_labels)
     return test_pred_labels
+
+
+def predict_with_avg_logits(trainer, test_dataset, tokenizer, max_length, stride):
+    # Run predictions with the trainer
+    raw_predictions = trainer.predict(test_dataset)
+    
+    # Extracting the predictions (logits) and labels
+    predictions = raw_predictions.predictions  # These are the logits
+    labels = raw_predictions.label_ids
+
+    print("INSIDE PREDICT WITH AVG LOGITS")
+    print("Predictions", predictions)
+    print("Labels", labels)
+    
+     # Create a dictionary to store the logits for each docID
+    doc_logits = {}
+    
+    # Iterate over the dataset to group the logits by docID
+    for i in range(len(test_dataset)):
+        doc_id = test_dataset[i]["docID"]
+        
+        # Check if the doc_id is already in the dictionary
+        if doc_id not in doc_logits:
+            doc_logits[doc_id] = []
+
+        # Add the logits for the current chunk
+        doc_logits[doc_id].append(predictions[i])
+    
+    # Now, average the logits for each document
+    averaged_logits = []
+    for doc_id, logits in doc_logits.items():
+        avg_logits = np.mean(logits, axis=0)  # Average logits across chunks
+        averaged_logits.append(avg_logits)
+
+    # Convert averaged logits to final predictions
+    final_predictions = np.argmax(averaged_logits, axis=-1)  # Apply softmax if needed before
+
+    print("Predicted Labels", final_predictions)
+
+    return final_predictions  # Return final document-level predictions
+
 
 def run(model_checkpoint, num_labels,
         train_texts, val_texts, test_texts,
@@ -260,115 +316,80 @@ def run(model_checkpoint, num_labels,
         hyperparameters=not None):
     
     max_length = hyperparameters.get("max_length", 256)
+    print("Max length:", max_length)
+    print("Stride", hyperparameters["stride"])
     # load BERT tokenizer
     tokenizer = AutoTokenizer.from_pretrained('google-bert/bert-base-uncased')
-    train_dataset, val_dataset, test_dataset = create_datasets(tokenizer, train_texts, val_texts, test_texts, y_train, y_val, y_test=None, max_length=max_length)
+    
+    read_datasets = False
+
+    if read_datasets:
+        # read datasets
+        print("Reading google datasets from disk")
+        train_dataset = load_from_disk("datasets/train_dataset")
+        val_dataset = load_from_disk("datasets/val_dataset")
+        test_dataset = load_from_disk("datasets/test_dataset")
+    else:
+        train_dataset, val_dataset, test_dataset = create_datasets(tokenizer,
+                                                               train_texts, val_texts, test_texts,
+                                                               y_train, y_val, y_test,
+                                                               max_length=max_length, stride=hyperparameters["stride"])
+
+
+    # save datasets
+    # train_dataset.save_to_disk("datasets/train_dataset_google")
+    # val_dataset.save_to_disk("datasets/val_dataset_google")
+    # test_dataset.save_to_disk("datasets/test_dataset_google")
+    # print("Datasets saved to disk")
+
     classes = np.unique(y_train)
     print("Type of classes:", type(classes))
     print("Classes:", classes)
     model = load_model(model_checkpoint, num_labels, classes, y_train, hyperparameters['use_weighted_loss'])
     # model = torch.nn.DataParallel(model)
     training_args = training_arguments(hyperparameters)
-    trainer = get_trainer(model, training_args, train_dataset, val_dataset, hyperparameters)
+    trainer = get_trainer(model, training_args, tokenizer, train_dataset, val_dataset, hyperparameters)
     # Train the model
     trainer.train()
-    predictions = predict(trainer, test_dataset)
-    test_pred_labels = get_labels(predictions)
+    if hyperparameters["stride"] is not None:
+        predictions = predict_with_avg_logits(trainer, test_dataset, tokenizer, max_length, hyperparameters["stride"])
+    else:
+        predictions = predict(trainer, test_dataset)
     # Generate and print the classification report
     if num_labels == 2:
-        print(classification_report(y_test, test_pred_labels, target_names=['Class 0', 'Class 1']))
+        print(classification_report(y_test, predictions, target_names=['Class 0', 'Class 1']))
     elif num_labels == 3:
-        print(classification_report(y_test, test_pred_labels, target_names=['Class 1', 'Class 2', 'Class 3']))
+        print(classification_report(y_test, predictions, target_names=['Class 1', 'Class 2', 'Class 3']))
     else:
-        print(classification_report(y_test, test_pred_labels, target_names=['Class 0', 'Class 1', 'Class 2', 'Class 3']))
-    return test_pred_labels
-
-
-def run_optimization(model_checkpoint, num_labels, train_texts, val_texts, test_texts, y_train, y_val, y_test):
-    import optuna
-    # num_train_epochs = 3
-
-    def objective(trial):
-        # Define the hyperparameters to be optimized
-        learning_rate = trial.suggest_float("learning_rate", 5e-7, 5e-5, log=True)
-        # num_train_epochs = trial.suggest_int("num_train_epochs", 5, 50, log=True)
-        # batch_size = trial.suggest_int("batch_size", 16, 48, step=16)
-        batch_size = 64
-        weight_decay = trial.suggest_float("weight_decay", 0.0, 0.05)
-        # loss_diff_threshold = trial.suggest_float("loss_diff_threshold", 0.1, 0.5, step=0.1)
-
-        # Update the training arguments with the suggested hyperparameters
-        training_args = training_arguments(epochs=100, batch_size=batch_size, weight_decay=weight_decay, learning_rate=learning_rate)
-        trainer = get_trainer(model, training_args, train_dataset, val_dataset, loss_diff_threshold=None)
-
-        # Train the model and get the evaluation results
-        trainer.train()
-        eval_result = trainer.evaluate()
-
-        # Return the metric to be maximized/minimized
-        return eval_result["eval_f1"]
-
-    classes = np.unique(y_train)
-    model = load_model(model_checkpoint, num_labels, classes, y_train)
-
-    tokenizer = AutoTokenizer.from_pretrained(model_checkpoint)
-    train_dataset, val_dataset, test_dataset = create_datasets(tokenizer, train_texts, val_texts, test_texts, y_train, y_val, y_test)
-
-    # Run the optimization
-    study = optuna.create_study(direction="maximize")
-    study.optimize(objective, n_trials=150)
-
-    # Print the best hyperparameters
-    print("Best trial:")
-    trial = study.best_trial
-    print(f"  Value: {trial.value}")
-    print("  Params: ")
-    for key, value in trial.params.items():
-        print(f"    {key}: {value}")
-
-    # Train the model with the best hyperparameters
-    best_training_args = training_arguments(epochs=100, batch_size=64, weight_decay=trial.params["weight_decay"], learning_rate=trial.params["learning_rate"])
-
-    trainer = get_trainer(model, best_training_args, train_dataset, val_dataset, loss_diff_threshold=None)
-
-    # Train the model
-    trainer.train()
-
-    # Predict the test dataset
-    predictions = predict(trainer, test_dataset)
-
-    # Generate and print the classification report
-    test_pred_labels = get_labels(predictions)
-    print(classification_report(y_test, test_pred_labels, target_names=['Class 0', 'Class 1', 'Class 2', 'Class 3']))
-
-    import os
-    # print if path "../data/trial_summaries" exists
-    print("Trial summary path exists: ", os.path.exists("data/trial_summaries"))
-
-    # Save the trial summary to a CSV file
-    sum_df = study.trials_dataframe()
-    sum_df.to_csv(f'data/trial_summaries/summary_{model_checkpoint}_{datetime.now()}.csv', index=False)
-    print("Trial summary:\n", sum_df)
-
-    return test_pred_labels
+        print(classification_report(y_test, predictions, target_names=['Class 0', 'Class 1', 'Class 2', 'Class 3']))
+    return predictions
 
 
 def run_lora(model_checkpoint, num_labels,
              train_texts, val_texts, test_texts,
              y_train, y_val, y_test,
              hyperparameters):
-    from peft import LoraConfig, get_peft_model
+    from peft import LoraConfig, get_peft_model, TaskType
 
     max_length = hyperparameters.get("max_length", 256)
 
     # tokenizer = AutoTokenizer.from_pretrained(model_checkpoint)
     tokenizer = AutoTokenizer.from_pretrained('google-bert/bert-base-uncased')
-    train_dataset, val_dataset, test_dataset = create_datasets(tokenizer, train_texts, val_texts, test_texts, y_train, y_val, y_test, max_length)
+    train_dataset, val_dataset, test_dataset = create_datasets(tokenizer,
+                                                               train_texts, val_texts, test_texts,
+                                                               y_train, y_val, y_test,
+                                                               max_length, stride=hyperparameters["stride"])
+    
+    # train_dataset = load_from_disk("datasets/train_dataset")
+    # val_dataset = load_from_disk("datasets/val_dataset")
+    # test_dataset = load_from_disk("datasets/test_dataset")
+
     classes = np.unique(y_train)
     print("Type of classes:", type(classes))
     print("Classes:", classes)
     model = load_model(model_checkpoint, num_labels, classes, y_train, hyperparameters['use_weighted_loss'])
-    print(model)
+
+    # print(model)
 
     # LoRA config
     # target_modules=["q_proj", "v_proj"],
@@ -392,60 +413,82 @@ def run_lora(model_checkpoint, num_labels,
     #         f"distilbert.transformer.layer.{i}.ffn.lin2" for i in range(6)
     #     ],
     lora_config = LoraConfig(
-        target_modules=[
-            f"roberta.encoder.layer.{i}.attention.self.query" for i in range(12)] + [
-            f"roberta.encoder.layer.{i}.attention.self.key" for i in range(12)] + [
-            f"roberta.encoder.layer.{i}.attention.self.value" for i in range(12)] + [
-            f"roberta.encoder.layer.{i}.attention.output.dense" for i in range(12)] + [
-            f"roberta.encoder.layer.{i}.intermediate.dense" for i in range(12)] + [
-            f"roberta.encoder.layer.{i}.output.dense" for i in range(12)
-        ],
-        r=16,
-        task_type="SEQ_CLS",
+        # target_modules=[
+        #     f"roberta.encoder.layer.{i}.attention.self.query" for i in range(12)] + [
+        #     f"roberta.encoder.layer.{i}.attention.self.key" for i in range(12)] + [
+        #     f"roberta.encoder.layer.{i}.attention.self.value" for i in range(12)] + [
+        #     f"roberta.encoder.layer.{i}.attention.output.dense" for i in range(12)] + [
+        #     f"roberta.encoder.layer.{i}.intermediate.dense" for i in range(12)] + [
+        #     f"roberta.encoder.layer.{i}.output.dense" for i in range(12)
+        # ],
+        r=8,
+        # task_type="SEQ_CLS",
+        task_type=TaskType.SEQ_CLS,
         lora_alpha=32,
         lora_dropout=0.05,       # 0.05
         use_rslora=True
     )
 
     # load LoRA model
-    lora_model = get_peft_model(model, lora_config)
+    model = get_peft_model(model, lora_config)
+
+    # Example usage with your LoRA model
+    model.print_trainable_parameters()
+
+    print("YES DATA PARALLEL")
+    model = torch.nn.DataParallel(model)
+
+    # # Print out the parameters and whether they require gradient updates
+    # for name, param in model.named_parameters():
+    #     print(f"{name}: requires_grad={param.requires_grad}")
 
     training_args = training_arguments(hyperparameters)
-    trainer = get_trainer(lora_model, training_args, train_dataset, val_dataset, hyperparameters)
-    
+    trainer = get_trainer(model, training_args, tokenizer, train_dataset, val_dataset, hyperparameters)
+
+    print(torch.cuda.memory_summary())
+
     # Train the model
     print("Training the model...")
     print("Verifying train dataset structure...")
     print(train_dataset[0])  # This should print the first element to check structure
     trainer.train()
 
-    predictions = predict(trainer, test_dataset)
-    test_pred_labels = get_labels(predictions)
+    print(torch.cuda.memory_summary())
+
+    if hyperparameters["stride"] is not None:
+        predictions = predict_with_avg_logits(trainer, test_dataset, tokenizer, max_length, hyperparameters["stride"])
+    else:
+        predictions = predict(trainer, test_dataset)
     # Generate and print the classification report
     if num_labels == 2:
-        print(classification_report(y_test, test_pred_labels, target_names=['Class 0', 'Class 1']))
+        print(classification_report(y_test, predictions, target_names=['Class 0', 'Class 1']))
     elif num_labels == 3:
-        print(classification_report(y_test, test_pred_labels, target_names=['Class 1', 'Class 2', 'Class 3']))
+        print(classification_report(y_test, predictions, target_names=['Class 1', 'Class 2', 'Class 3']))
     else:
-        print(classification_report(y_test, test_pred_labels, target_names=['Class 0', 'Class 1', 'Class 2', 'Class 3']))
-    return test_pred_labels
+        print(classification_report(y_test, predictions, target_names=['Class 0', 'Class 1', 'Class 2', 'Class 3']))
+    return predictions
 
 from sklearn.model_selection import ParameterGrid
 from datetime import datetime
 
-def run_grid_search(model_checkpoint, num_labels, train_texts, val_texts, test_texts, y_train, y_val, y_test):
+def run_grid_search(model_checkpoint, num_labels,
+                    train_texts, val_texts, test_texts,
+                    y_train, y_val, y_test,
+                    hyperparameters):
     # Define the grid of hyperparameters to search
     param_grid = {
-        'learning_rate': [1e-6, 3e-6, 5e-6],
-        'warmup_steps': [1000, 1500, 2500]
+        'learning_rate': [2e-6, 2e-5, 2e-4],
+        # 'warmup_steps': [1000, 1500, 2500]
     }
 
     # Initialize variables to store the best results
     best_f1 = 0
     best_params = {}
 
+    max_length = hyperparameters.get("max_length", 256)
+
     # Create the datasets
-    tokenizer = AutoTokenizer.from_pretrained(model_checkpoint)
+    tokenizer = AutoTokenizer.from_pretrained('google-bert/bert-base-uncased')
     train_dataset, val_dataset, test_dataset = create_datasets(tokenizer, train_texts, val_texts, test_texts, y_train, y_val, y_test)
 
     # Load the initial model

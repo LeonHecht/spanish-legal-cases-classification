@@ -1,5 +1,26 @@
 # ignore corpus folder
-corpus/
+corpus/convertidos/
+corpus/descargados/
+corpus/train_texts/
+corpus/val_texts/
+corpus/test_texts/
+corpus/train_texts.csv
+corpus/val_texts.csv
+corpus/test_texts.csv
+corpus/google_ocr_results*
+corpus/corpus_docs/
+
+*.jpg
+
+output.txt
+output2.txt
+output_google_line21.txt
+output3.txt
+excel_line23_24.txt
+
+main.py
+
+google_ocr.py
 
 # ignore documentation folder
 documentation/
