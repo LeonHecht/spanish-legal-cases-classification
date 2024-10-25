@@ -124,7 +124,7 @@ def mamba_finetuning(train_texts, val_texts, test_texts,
     # writer.close()
 
 
-def run_experiment(hyperparameters, model_checkpoint, corpus_path, mamba, read_datasets):
+def run_experiment(hyperparameters, model_checkpoint, corpus_path, mamba):
     print_time.print_("Start-Time")
 
     df = pd.read_csv(corpus_path, usecols=['text', 'label'])

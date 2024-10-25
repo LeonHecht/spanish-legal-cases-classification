@@ -164,6 +164,7 @@ def create_datasets(tokenizer, train_texts, val_texts, test_texts, y_train, y_va
                 encodings["labels"].extend([labels[i]] * num_chunks)
 
         print(f"Total number of chunks: {total_chunks}")
+        print(f"Len of encodings['input_ids']: {len(encodings['input_ids'])}")
 
         return encodings
 
@@ -187,7 +188,8 @@ def create_datasets(tokenizer, train_texts, val_texts, test_texts, y_train, y_va
     val_dataset = Dataset.from_dict(val_encodings)
     test_dataset = Dataset.from_dict(test_encodings)
     
-    print("Sample train input_ids:", train_dataset['input_ids'][0])
+    # print number of train instances
+    print("Number of training instances:", len(train_dataset))
 
     return train_dataset, val_dataset, test_dataset        
 
@@ -221,6 +223,9 @@ def training_arguments(hyperparameters):
     learning_rate = hyperparameters.get("learning_rate", 5e-6)
     warmup_steps = hyperparameters.get("warmup_steps", 1000)
     metric = hyperparameters.get("metric_for_best_model", "f1")
+    max_grad_norm = hyperparameters.get("max_grad_norm", 0)
+    gradient_accumulation_steps = hyperparameters.get("gradient_accumulation_steps", 1)
+    mixed_precision = hyperparameters.get("mixed_precision", False)
 
     print("Training arguments")
     print("Batch size:", batch_size)
@@ -228,24 +233,30 @@ def training_arguments(hyperparameters):
     print("Learning rate:", learning_rate)
     print("Warmup steps:", warmup_steps)
     print("Metric for best model:", metric)
+    print("Max grad norm:", max_grad_norm)
+    print("Gradient accumulation steps:", gradient_accumulation_steps)
+    print("Mixed precision:", mixed_precision)
 
     training_args = TrainingArguments(
-    output_dir='./results',
-    num_train_epochs=epochs,
-    per_device_train_batch_size=batch_size,
-    per_device_eval_batch_size=batch_size,
-    warmup_steps=warmup_steps,
-    weight_decay=weight_decay,
-    learning_rate=learning_rate,
-    logging_dir='./logs',
-    logging_steps=10,
-    evaluation_strategy="epoch",
-    save_strategy="epoch",
-    save_total_limit=1,  # limit the number of saved checkpoints
-    load_best_model_at_end=True,
-    metric_for_best_model=metric,
-    remove_unused_columns=True,  # Keep all columns
-    greater_is_better=True  # Higher f1 score is better
+        output_dir='./results',
+        num_train_epochs=epochs,
+        per_device_train_batch_size=batch_size,
+        per_device_eval_batch_size=batch_size,
+        warmup_steps=warmup_steps,
+        weight_decay=weight_decay,
+        learning_rate=learning_rate,
+        logging_dir='./logs',
+        logging_steps=10,
+        evaluation_strategy="epoch",
+        save_strategy="epoch",
+        save_total_limit=1,  # limit the number of saved checkpoints
+        load_best_model_at_end=True,
+        metric_for_best_model=metric,
+        remove_unused_columns=True,
+        greater_is_better=True,  # Higher f1 score is better
+        max_grad_norm=max_grad_norm,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        fp16=mixed_precision,
     )
     return training_args
 
@@ -314,6 +325,7 @@ def run(model_checkpoint, num_labels,
         train_texts, val_texts, test_texts,
         y_train, y_val, y_test=None,
         hyperparameters=not None):
+    import os
     
     max_length = hyperparameters.get("max_length", 256)
     print("Max length:", max_length)
@@ -321,27 +333,31 @@ def run(model_checkpoint, num_labels,
     # load BERT tokenizer
     tokenizer = AutoTokenizer.from_pretrained('google-bert/bert-base-uncased')
     
-    read_datasets = False
+    read_datasets = hyperparameters.get("read_datasets", False)
+    datasets_read_path = hyperparameters.get("datasets_read_path", "datasets")
 
     if read_datasets:
         # read datasets
-        print("Reading google datasets from disk")
-        train_dataset = load_from_disk("datasets/train_dataset")
-        val_dataset = load_from_disk("datasets/val_dataset")
-        test_dataset = load_from_disk("datasets/test_dataset")
+        print(f"Reading datasets from disk at path {datasets_read_path}")
+        train_dataset = load_from_disk(os.path.join(datasets_read_path, "train_dataset"))
+        val_dataset = load_from_disk(os.path.join(datasets_read_path, "val_dataset"))
+        test_dataset = load_from_disk(os.path.join(datasets_read_path, "test_dataset"))
     else:
         train_dataset, val_dataset, test_dataset = create_datasets(tokenizer,
                                                                train_texts, val_texts, test_texts,
                                                                y_train, y_val, y_test,
                                                                max_length=max_length, stride=hyperparameters["stride"])
+    
+    save_datasets = hyperparameters.get("save_datasets", False)
+    datasets_save_path = hyperparameters.get("datasets_save_path", "datasets")
 
-
-    # save datasets
-    # train_dataset.save_to_disk("datasets/train_dataset_google")
-    # val_dataset.save_to_disk("datasets/val_dataset_google")
-    # test_dataset.save_to_disk("datasets/test_dataset_google")
-    # print("Datasets saved to disk")
-
+    if save_datasets:
+        # save datasets
+        train_dataset.save_to_disk(os.path.join(datasets_save_path, "train_dataset"))
+        val_dataset.save_to_disk(os.path.join(datasets_save_path, "val_dataset"))
+        test_dataset.save_to_disk(os.path.join(datasets_save_path, "test_dataset"))
+        print(f"Datasets saved to disk at path {datasets_save_path}")
+    
     classes = np.unique(y_train)
     print("Type of classes:", type(classes))
     print("Classes:", classes)

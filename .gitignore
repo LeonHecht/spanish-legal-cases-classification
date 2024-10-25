@@ -12,11 +12,7 @@ corpus/corpus_docs/
 
 *.jpg
 
-output.txt
-output2.txt
-output_google_line21.txt
-output3.txt
-excel_line23_24.txt
+outputs/
 
 main.py
 
