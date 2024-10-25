@@ -10,6 +10,8 @@ corpus/test_texts.csv
 corpus/google_ocr_results*
 corpus/corpus_docs/
 
+.history/
+
 datasets/
 
 *.jpg
