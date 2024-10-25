@@ -9,7 +9,8 @@ corpus/val_texts.csv
 corpus/test_texts.csv
 corpus/google_ocr_results*
 corpus/corpus_docs/
-corpus/datasets/
+
+datasets/
 
 *.jpg
 
